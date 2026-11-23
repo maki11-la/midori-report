@@ -46,3 +46,10 @@ MIDORI_GH_TOKEN=... ./update.sh
 ```
 
 ローカルで見るだけなら `python3 build.py` でもよい。
+
+
+## 見た目を直すとき
+
+- 画面(HTML/CSS/JS)は `template.html`、数字カード・今日の一言・短い結論の取り出しは `summary.py` にあります。
+- `build.py` が `reports.json` と上の2つから `index.html` と `sw.js` を作ります。`reports.json` は変えません。
+- 数字カードは本文にそのまま書かれた数字だけを拾います(見つからない指標は出しません)。
