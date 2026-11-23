@@ -6,20 +6,21 @@
     python3 build.py
 
 reports.json にレポートを追加してから、上のコマンドで index.html と sw.js を再生成する。
-画面の見た目は template.html、数字カードの取り出しは summary.py にある。
+画面の見た目は template.html、旧形式の数字カードは summary.py、新形式(2026-11-23〜)の読み取りは v2.py にある。
+画面の確認だけしたいときは python3 build.py --preview fixtures/reports-test.json (preview.html を作る。index.html は触らない)。
 生成された index.html はダブルクリック（file://）でも閲覧できる。
 https で公開したときは、初回訪問後にオフラインでも開ける。
 
 reports.json の各要素:
-    date            ISO日付 (例: "2026-11-21")
-    title           見出し
-    type            "日次" または "週まとめ"
-    conclusion      サイドバー・タイムライン用の一行
-                    （通常は結論の先頭1文。短い場合は2文まで）
-    conclusion_full 結論の全文 (Markdown、省略可。無い場合は conclusion を使う)
-                    markdown 内の「**結論:**」に続く本文から取る
+    date            必須。ISO日付 (例: "2026-11-21")
+    markdown        必須。ミドリのレポート本文をそのまま (Markdown。文言・数字は変更しない)
+    title           省略可。無ければ本文の「夜の戦略レポート …」の行、それも無ければ日付から作る
+    type            省略可。"日次" または "週まとめ"。無ければ土曜=週まとめ、それ以外=日次
+    conclusion      省略可。サイドバー・年表用の一行。無ければ
+                    ・新形式: 「今日の要点」の1行目
+                    ・旧形式: 「**結論:**」の最初の文、無ければ本文の最初の文
+    conclusion_full 旧形式のみ・省略可。結論の全文 (Markdown)
     summary         (自動) build.py が本文から作る。reports.json には書かない
-    markdown        レポート本文 (Markdown。文言・数字は変更しない)
 
 新しいレポートを足す手順:
     1. reports.json の配列に、上の形のオブジェクトを追加する
@@ -33,7 +34,11 @@ import json
 import sys
 from pathlib import Path
 
-from summary import summarize
+import datetime
+import re
+
+import v2
+from summary import split_sentences, summarize
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "reports.json"
@@ -66,19 +71,92 @@ def embed_json(obj):
     )
 
 
-def load_reports():
+WEEKDAYS = "月火水木金土日"
+
+
+def _derive_type(date: str) -> str:
+    try:
+        y, m, d = map(int, date.split("-"))
+        return "週まとめ" if datetime.date(y, m, d).weekday() == 5 else "日次"
+    except Exception:
+        return "日次"
+
+
+def _derive_title(date: str, md: str) -> str:
+    for line in md.replace("\r\n", "\n").split("\n"):
+        s = re.sub(r"^#+\s*", "", line.strip())
+        s = re.sub(r"^\*\*(.+?)\*\*$", r"\1", s).strip()
+        if s and "夜の戦略レポート" in s:
+            return s
+    try:
+        y, m, d = map(int, date.split("-"))
+        wd = WEEKDAYS[datetime.date(y, m, d).weekday()]
+        return f"夜の戦略レポート {m}/{d}({wd})"
+    except Exception:
+        return "夜の戦略レポート"
+
+
+def _derive_conclusion(md: str) -> str:
+    """「**結論:**」があればその最初の文、なければ本文の最初の文を使う。"""
+    m = re.search(r"\*\*結論[^*]*\*\*\s*[:：]?\s*(.+)", md)
+    if m and m.group(1).strip():
+        text = m.group(1).strip()
+    else:
+        text = ""
+        for line in md.replace("\r\n", "\n").split("\n"):
+            s = line.strip()
+            if not s or s.startswith("#") or re.fullmatch(r"\*\*[^*]+\*\*[:：]?", s) or s.startswith("|") or s == "---":
+                continue
+            text = re.sub(r"^(?:[-*・]|\d+[.．)])\s+", "", s)
+            break
+    sents = split_sentences(text)
+    return (sents[0] if sents else text).strip()
+
+
+def prepare(r: dict, warnings: list) -> dict:
+    """reports.json の1件に、足りない項目(結論・タイトル・種別)を補い、新形式なら構造を付ける。"""
+    r = dict(r)
+    md = r.get("markdown") or ""
+    r["markdown"] = md
+    if not (r.get("title") or "").strip():
+        r["title"] = _derive_title(r["date"], md)
+    if not (r.get("type") or "").strip():
+        r["type"] = _derive_type(r["date"])
+    parsed = v2.parse(md)
+    if parsed:
+        head = v2.headline(parsed)
+        if not (r.get("conclusion") or "").strip():
+            r["conclusion"] = head
+        r["summary"] = {"headline": head, "lead": "", "rest": "", "stats": []}
+        r["v2"] = parsed
+        for w in v2.validate(parsed):
+            warnings.append(f"{r['date']}: {w}")
+    else:
+        if not (r.get("conclusion") or "").strip():
+            r["conclusion"] = _derive_conclusion(md)
+        r["summary"] = summarize(r)
+    return r
+
+
+def load_reports(extra_path=None):
     if not DATA.exists():
         sys.exit(f"reports.json が見つかりません: {DATA}")
     reports = json.loads(DATA.read_text(encoding="utf-8"))
+    if extra_path:
+        reports = reports + json.loads(Path(extra_path).read_text(encoding="utf-8"))
     if not isinstance(reports, list):
         sys.exit("reports.json は配列である必要があります")
-    required = {"date", "title", "type", "conclusion", "markdown"}
+    # 必須は date と markdown だけ。title / type / conclusion は無ければ本文から補う。
+    by_date = {}
     for i, r in enumerate(reports):
-        missing = required - set(r)
+        missing = {"date", "markdown"} - set(r)
         if missing:
             sys.exit(f"reports.json[{i}] に不足しています: {', '.join(sorted(missing))}")
-    reports.sort(key=lambda r: r["date"], reverse=True)
-    return reports
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(r["date"])):
+            sys.exit(f"reports.json[{i}] の date は YYYY-MM-DD にしてください: {r['date']}")
+        by_date[r["date"]] = r  # 同じ日付が複数あれば後のものを使う
+    out = sorted(by_date.values(), key=lambda r: r["date"], reverse=True)
+    return out
 
 
 def cache_version(*blobs: bytes) -> str:
@@ -106,19 +184,39 @@ def write_sw(version: str) -> None:
     )
 
 
-def build():
-    reports = load_reports()
-    # 「今日の一言」「短い結論」「数字カード」は本文から毎回自動で作る (reports.json は変更しない)
-    embedded = [dict(r, summary=summarize(r)) for r in reports]
+def build(preview=None):
+    reports = load_reports(preview)
+    warnings: list = []
+    # 「今日の一言」「数字カード」「新形式の構造」は本文から毎回自動で作る (reports.json は変更しない)
+    embedded = [prepare(r, warnings) for r in reports]
     html = TEMPLATE.replace("__REPORTS_JSON__", embed_json(embedded))
-    OUT.write_text(html, encoding="utf-8", newline="\n")
-    version = cache_version(html.encode("utf-8"))
-    write_sw(version)
-    print(f"Wrote {OUT} ({OUT.stat().st_size:,} bytes, {len(reports)} reports)")
-    print(f"Wrote {SW_OUT} (cache midori-viewer-{version})")
-    if reports:
-        print(f"Date range: {reports[-1]['date']} — {reports[0]['date']}")
+    if preview:
+        out = ROOT / "preview.html"
+        out.write_text(html, encoding="utf-8", newline="\n")
+        print(f"Wrote {out} (preview: {len(embedded)} reports; index.html / sw.js are not touched)")
+    else:
+        OUT.write_text(html, encoding="utf-8", newline="\n")
+        version = cache_version(html.encode("utf-8"))
+        write_sw(version)
+        print(f"Wrote {OUT} ({OUT.stat().st_size:,} bytes, {len(reports)} reports)")
+        print(f"Wrote {SW_OUT} (cache midori-viewer-{version})")
+    if embedded:
+        print(f"Date range: {embedded[-1]['date']} — {embedded[0]['date']}")
+        latest = embedded[0]
+        if latest.get("v2"):
+            keys = ",".join(s["key"] for s in latest["v2"]["sections"])
+            print(f"Latest {latest['date']}: format=v2 sections={keys}")
+        else:
+            print(f"Latest {latest['date']}: format=old")
+    new_fmt = [e["date"] for e in embedded if e.get("v2")]
+    if new_fmt:
+        print("v2 reports: " + ", ".join(sorted(new_fmt)))
+    for w in warnings:
+        print("WARN " + w)
 
 
 if __name__ == "__main__":
-    build()
+    if "--preview" in sys.argv:
+        build(sys.argv[sys.argv.index("--preview") + 1])
+    else:
+        build()

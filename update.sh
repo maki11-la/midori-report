@@ -16,9 +16,9 @@ fi
 python3 build.py
 
 # Stage only the daily artifacts (not screenshots or local junk).
-git add -- reports.json index.html sw.js manifest.json \
+git add -- reports.json index.html sw.js manifest.json template.html summary.py v2.py update.sh \
   icon-180.png icon-192.png icon-512.png icon-512-maskable.png \
-  apple-touch-icon.png og.png build.py
+  apple-touch-icon.png og.png build.py README.md
 
 if git diff --cached --quiet; then
   echo "No changes to commit"
@@ -26,7 +26,7 @@ if git diff --cached --quiet; then
 fi
 
 DATE="$(python3 -c "import json; print(max(r['date'] for r in json.load(open('reports.json'))))")"
-git commit -m "Add report ${DATE}"
+git commit -m "${COMMIT_MSG:-Add report ${DATE}}"
 
 # Push with the token from the environment. Do not write it into the remote URL,
 # git config, or any committed file. Disable tracing so the header is not logged.
