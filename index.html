@@ -1560,7 +1560,11 @@ if (view === "time") {
 
 if ((location.protocol === "https:" || location.protocol === "http:") && "serviceWorker" in navigator) {
   window.addEventListener("load", function () {
-    navigator.serviceWorker.register("./sw.js").catch(function () {});
+    navigator.serviceWorker.register("./sw.js", { updateViaCache: "none" }).then(function (r) { r.update(); }).catch(function () {});
+    var hadCtrl = !!navigator.serviceWorker.controller, reloaded = false;
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (hadCtrl && !reloaded) { reloaded = true; location.reload(); }
+    });
   });
 }
 </script>
